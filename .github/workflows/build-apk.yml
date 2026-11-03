@@ -1,0 +1,192 @@
+name: build-apk
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: 生成工程
+        run: |
+          mkdir -p android/app/src/main/java/com/dshmulti/app
+          cat > android/settings.gradle.kts <<'SETTINGS_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "dsh-multi"
+          include(":app")
+          SETTINGS_EOF
+          cat > android/build.gradle.kts <<'ROOT_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          ROOT_EOF
+          cat > android/gradle.properties <<'PROPS_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          PROPS_EOF
+          cat > android/app/build.gradle.kts <<'APP_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.dshmulti.app"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.dshmulti.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "0.1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.webkit:webkit:1.11.0")
+          }
+          APP_EOF
+          cat > android/app/src/main/AndroidManifest.xml <<'MANIFEST_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="DSH Multi"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          MANIFEST_EOF
+          cat > android/app/src/main/java/com/dshmulti/app/MainActivity.kt <<'KT_EOF'
+          package com.dshmulti.app
+
+          import android.annotation.SuppressLint
+          import android.os.Bundle
+          import android.view.KeyEvent
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import androidx.appcompat.app.AppCompatActivity
+
+          /**
+           * 只做一件事：把本机跑的 dsh-multi 面板装进一个窗口。
+           *
+           * 地址默认 http://127.0.0.1:4399（宿主服务），可以在系统设置里改：
+           * 长按输入框旁的地址，或者用 adb：
+           *   adb shell am start -n com.dshmulti.app/.MainActivity --es url "http://127.0.0.1:4399"
+           */
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var web: WebView
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  web = WebView(this)
+                  web.settings.apply {
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      databaseEnabled = true
+                      mediaPlaybackRequiresUserGesture = false
+                      useWideViewPort = true
+                      loadWithOverviewMode = true
+                  }
+                  web.webViewClient = WebViewClient()
+
+                  val fromIntent = intent?.getStringExtra("url")
+                  val saved = getSharedPreferences("dsh", MODE_PRIVATE).getString("url", null)
+                  val url = fromIntent ?: saved ?: "http://127.0.0.1:4399"
+
+                  if (fromIntent != null) {
+                      getSharedPreferences("dsh", MODE_PRIVATE).edit().putString("url", fromIntent).apply()
+                  }
+
+                  web.loadUrl(url)
+                  setContentView(web)
+              }
+
+              override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+                  if (keyCode == KeyEvent.KEYCODE_BACK && this::web.isInitialized && web.canGoBack()) {
+                      web.goBack()
+                      return true
+                  }
+                  return super.onKeyDown(keyCode, event)
+              }
+
+              override fun onDestroy() {
+                  if (this::web.isInitialized) web.destroy()
+                  super.onDestroy()
+              }
+          }
+          KT_EOF
+
+      - name: 编译
+        working-directory: android
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-multi-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
